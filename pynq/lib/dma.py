@@ -31,7 +31,7 @@ from pynq import DefaultIP
 from pynq import UnsupportedConfiguration
 from pynq import allocate
 import numpy
-
+import warnings
 
 __author__ = 'Peter Ogden, Anurag Dubey'
 __copyright__ = 'Copyright 2017, Xilinx'
@@ -248,7 +248,7 @@ class _SGDMAChannel:
     through the AxiDMA class.
 
     """
-    def __init__(self, mmio, max_size, width, tx_rx, dre, interrupt=None):
+    def __init__(self, mmio, max_size, width, tx_rx, dre, high_address,interrupt=None):
         """Initialize the simple DMA object.
 
         Parameters
@@ -263,6 +263,8 @@ class _SGDMAChannel:
             Set to DMA_TYPE_TX(1) for sending or DMA_TYPE_RX(0) for receiving.
         dre : bool
             Data alignment enable.
+        high_address :
+            Maximum memory address the DMA can access.
         interrupt: Interrupt
             Interrupt used by the DMA channel.
 
@@ -543,6 +545,113 @@ class _SGDMAChannel:
         self._descr.close()
         self._descr = None
 
+        
+        def make_BDRing(self, num_BDs, buffer_length = 0):
+        """
+        Allocate a contiguous memory space to store a BDRing chain
+        BDs must be aligned to 0x40 --> 16 fields each (13 used by HW)
+        00h: NXTDESC[0]
+        04h: NXTDESC_MSB[1]
+        08h: BUFFER_ADDRESS[2]
+        0Ch: BUFFER_ADDRESS_MSB[3]
+        10h: RESERVED[4]
+        14h: RESERVED[5]
+        18h: CONTROL[6]
+        1Ch: STATUS[7]
+        20h: APP0[8]
+        24h: APP1[9]
+        28h: APP2[10]
+        2Ch: APP3[11]
+        30h: APP4[12]
+        34h: NOT USED[13]
+        38h: NOT USED[14]
+        3Ch: NOT USED[15]
+        
+        This function only sets up the dummy BD Ring for faster execution in case of high 
+            number of BDs. Then copying to the contigueos BD ring using allocate by the
+            user.
+        
+        
+        Parameters
+        ----------
+        num_BDs : int
+            Number of Buffer Descriptors to be created in a chain
+        buffer_length : int
+            The length of the memory buffer in bytes, default value = 0. If value > 0, then all BDs will have the same buffer length
+        
+        Returns
+        ----------
+        BDRing : array
+            An array containing BDs in a chain
+        
+        """
+        if (buffer_length < 0):
+            raise RuntimeError('Buffer Length cannot be less that 0')
+        if (buffer_length > self._sg_buffer_length):
+            raise ValueError('Buffer length is {} greater than the maximum DMA buffer size {}' .format(buffer_length, self._sg_buffer_length))
+        
+        self.dummyBDRing = np.zeros([num_BDs, 16], dtype='u4')
+        self.BDRing = allocate(shape=(num_BDs, 16), dtype='u4')
+        base_addr = self.BDRing.physical_address
+        
+        for x in range(num_BDs):
+            self.dummyBDRing[x][0] = (base_addr + ((x+1)%num_BDs)*0x40)
+            self.dummyBDRing[x][6] = buffer_length
+            if ((x==0) and self._tx):
+                self.dummyBDRing[x][6] |= 0x08000000
+            if ((x==num_BDs-1) and self._tx):
+                self.dummyBDRing[x][6] |= 0x04000000
+
+    def write_first_BD(self):
+        """
+        Write to CURDESC register the pointer to the first BD
+        The DMA engine has to be stopped for write access to this register, otherwise: read-only
+        """
+        self.stop()
+        self._mmio.write(self._offset + 0x08, self.BDRing[0].physical_address & 0xFFFFFFFF)
+        
+    def write_last_BD(self, start = True):
+        """
+        Write to TAILDESC register the pointer to the last BD (or tail BD)
+        The DMA engine will start automatically if not halted, otherwise: a write only 
+        reposition the tail pointer
+        """
+        if (start):
+            self.start()
+        self._mmio.write(self._offset + 0x10, 
+                         self.BDRing[-1].physical_address & 0xFFFFFFFF)
+    def flush_BD(self):
+        self.BDRing.flush()
+        def set_buffer_length(self, idx, buffer_length):
+        """
+        Sets the buffer length of a particular BD
+        
+        """
+        if (buffer_length < 1):
+            raise RuntimeError('Buffer Length cannot be less than 1')
+        if (buffer_length > self._sg_buffer_length):
+            raise ValueError('Buffer length is {} greater than the maximum DMA buffer size {}'.format(buffer_length, self._sg_buffer_length))
+
+        self.dummyBDRing[idx][6] |= buffer_length
+    
+    def set_buffer_address(self, idx, buffer_address):
+        """
+        Sets the buffer address of a particular BD
+        
+        """
+        if(buffer_address < 0):
+            raise RuntimeError('Buffer address cannot be negative')
+        if(buffer_address > self._high_address):
+            raise RuntimeError('The provided DMA engine cannot access address range than {}', hex(self._high_address))
+        
+        self.dummyBDRing[idx][2] = buffer_address
+
+        def write_BDs(self, start = True):
+        self.stop()
+        self._mmio.write(self._offset + 0x08, self.BDRing[0].physical_address & 0xFFFFFFFF)
+        if (start):
+            self.start()
+        self._mmio.write(self._offset + 0x10, self.BDRing[-1].physical_address & 0xFFFFFFFF)
 
 class DMA(DefaultIP):
     """Class for Interacting with the AXI Simple DMA Engine
@@ -599,8 +708,16 @@ class DMA(DefaultIP):
 
         if 'c_include_sg' in description['parameters']:
             self._sg = bool(int(description['parameters']['c_include_sg']))
+            self._sg_buffer_length = 1 << int(description['parameters']['C_SG_LENGTH_WIDTH'])
         else:
             self._sg = False
+         
+        if 'C_HIGHADDR' in description['parameters']:
+            self._high_address = int(ol.ip_dict[name]['parameters']['C_HIGHADDR'], 16)
+        else:
+            warnings.warn('DMA High Address is not defined.'
+                          'DMA will fail if data access is beyound High Address')
+            
 
         if self._micro and self._sg:
             raise UnsupportedConfiguration(
@@ -652,6 +769,7 @@ class DMA(DefaultIP):
                         6,
                         DMA_TYPE_TX,
                         dre,
+                        _high_address,
                         self.mm2s_introut)
                 else:
                     self.sendchannel = _SDMAChannel(
@@ -668,7 +786,8 @@ class DMA(DefaultIP):
                         max_size,
                         6,
                         DMA_TYPE_TX,
-                        dre)
+                        dre,
+                        _high_address)
                 else:
                     self.sendchannel = _SDMAChannel(
                         self.mmio,
@@ -710,6 +829,7 @@ class DMA(DefaultIP):
                         6,
                         DMA_TYPE_RX,
                         dre,
+                        _high_address,
                         self.s2mm_introut)
                 else:
                     self.recvchannel = _SDMAChannel(
@@ -726,7 +846,8 @@ class DMA(DefaultIP):
                         max_size,
                         6,
                         DMA_TYPE_RX,
-                        dre)
+                        dre,
+                        _high_address)
                 else:
                     self.recvchannel = _SDMAChannel(
                         self.mmio,
