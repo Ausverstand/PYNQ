@@ -545,10 +545,8 @@ class _SGDMAChannel:
         self._descr.close()
         self._descr = None
 
-        
-        def make_BDRing(self, num_BDs, buffer_length = 0):
-        """
-        Allocate a contiguous memory space to store a BDRing chain
+    def make_BDRing(self, num_BDs, buffer_length = 0):
+        """Allocate a contiguous memory space to store a BDRing chain
         BDs must be aligned to 0x40 --> 16 fields each (13 used by HW)
         00h: NXTDESC[0]
         04h: NXTDESC_MSB[1]
@@ -570,8 +568,7 @@ class _SGDMAChannel:
         This function only sets up the dummy BD Ring for faster execution in case of high 
             number of BDs. Then copying to the contigueos BD ring using allocate by the
             user.
-        
-        
+
         Parameters
         ----------
         num_BDs : int
@@ -588,7 +585,8 @@ class _SGDMAChannel:
         if (buffer_length < 0):
             raise RuntimeError('Buffer Length cannot be less that 0')
         if (buffer_length > self._sg_buffer_length):
-            raise ValueError('Buffer length is {} greater than the maximum DMA buffer size {}' .format(buffer_length, self._sg_buffer_length))
+            raise ValueError('Buffer length is {} greater than the maximum DMA buffer size {}'
+                             .format(buffer_length, self._sg_buffer_length))
         
         self.dummyBDRing = np.zeros([num_BDs, 16], dtype='u4')
         self.BDRing = allocate(shape=(num_BDs, 16), dtype='u4')
@@ -618,20 +616,21 @@ class _SGDMAChannel:
         """
         if (start):
             self.start()
-        self._mmio.write(self._offset + 0x10, 
-                         self.BDRing[-1].physical_address & 0xFFFFFFFF)
+        self._mmio.write(self._offset + 0x10, self.BDRing[-1].physical_address & 0xFFFFFFFF)
+
     def flush_BD(self):
         self.BDRing.flush()
-        def set_buffer_length(self, idx, buffer_length):
+
+    def set_buffer_length(self, idx, buffer_length):
         """
         Sets the buffer length of a particular BD
-        
+
         """
         if (buffer_length < 1):
             raise RuntimeError('Buffer Length cannot be less than 1')
         if (buffer_length > self._sg_buffer_length):
-            raise ValueError('Buffer length is {} greater than the maximum DMA buffer size {}'.format(buffer_length, self._sg_buffer_length))
-
+            raise ValueError('Buffer length is {} greater than the maximum DMA buffer size {}'
+                             .format(buffer_length, self._sg_buffer_length))
         self.dummyBDRing[idx][6] |= buffer_length
     
     def set_buffer_address(self, idx, buffer_address):
@@ -643,10 +642,9 @@ class _SGDMAChannel:
             raise RuntimeError('Buffer address cannot be negative')
         if(buffer_address > self._high_address):
             raise RuntimeError('The provided DMA engine cannot access address range than {}', hex(self._high_address))
-        
         self.dummyBDRing[idx][2] = buffer_address
 
-        def write_BDs(self, start = True):
+    def write_BDs(self, start = True):
         self.stop()
         self._mmio.write(self._offset + 0x08, self.BDRing[0].physical_address & 0xFFFFFFFF)
         if (start):
